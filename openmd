@@ -1,0 +1,704 @@
+#!/usr/bin/env bash
+# openmd: Render Markdown files into polished HTML previews.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: openmd [options] <markdown-file>
+
+Options:
+  --title TEXT   Set a custom HTML <title>
+  --no-open      Generate the preview without launching a browser
+  -h, --help     Show this help and exit
+
+Environment:
+  OPENMD_NO_OPEN=1        Skip launching the browser (useful for tests/CI)
+  OPENMD_OUTPUT_DIR=/path Directory for generated previews (defaults to TMPDIR)
+
+Preview features:
+  • GitHub-flavored Markdown rendering via Marked.js
+  • Syntax highlighting via highlight.js
+  • Dark/light themes with system sync and manual toggles
+  • Quick actions for saving PDFs and copying Markdown or paths
+  • Sticky metadata header and safe anchor navigation
+EOF
+}
+
+error() {
+  printf 'openmd: %s\n' "$1" >&2
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    error "required command '$1' not found"
+    exit 1
+  fi
+}
+
+parse_args() {
+  local positional=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --title)
+        if [[ $# -lt 2 ]]; then
+          error "--title requires an argument"
+          exit 1
+        fi
+        PAGE_TITLE="$2"
+        shift 2
+        ;;
+      --no-open)
+        NO_OPEN=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        positional+=("$@")
+        break
+        ;;
+      -*)
+        error "unknown option: $1"
+        usage >&2
+        exit 1
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "${#positional[@]}" -ne 1 ]]; then
+    error "exactly one Markdown file is required"
+    usage >&2
+    exit 1
+  fi
+
+  MARKDOWN_FILE="${positional[0]}"
+}
+
+abspath() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.abspath(sys.argv[1]))
+PY
+}
+
+create_temp_html() {
+  local base_dir="${OPENMD_OUTPUT_DIR:-${TMPDIR:-/tmp}}"
+  if [[ ! -d "$base_dir" ]]; then
+    error "output directory '$base_dir' does not exist"
+    exit 1
+  fi
+  local tmpfile
+  tmpfile=$(mktemp "$base_dir/openmd.XXXXXX") || {
+    error "failed to create temporary file"
+    exit 1
+  }
+  GENERATED_HTML="${tmpfile}.html"
+  mv "$tmpfile" "$GENERATED_HTML"
+}
+
+launch_browser() {
+  local target="$1"
+  if command -v open >/dev/null 2>&1; then
+    open "$target" >/dev/null 2>&1 &
+    return 0
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$target" >/dev/null 2>&1 &
+    return 0
+  elif command -v start >/dev/null 2>&1; then
+    start "" "$target" >/dev/null 2>&1 &
+    return 0
+  fi
+  error "could not locate a browser launcher (expected one of: open, xdg-open, start)"
+  return 1
+}
+
+PAGE_TITLE=""
+NO_OPEN=0
+MARKDOWN_FILE=""
+
+parse_args "$@"
+
+require_command python3
+
+if [[ ! -f "$MARKDOWN_FILE" ]]; then
+  error "file not found: $MARKDOWN_FILE"
+  exit 1
+fi
+
+ABS_PATH=$(abspath "$MARKDOWN_FILE")
+BASENAME=$(basename "$ABS_PATH")
+TITLE=${PAGE_TITLE:-"${BASENAME} — Markdown Preview"}
+GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+create_temp_html
+
+python3 - "$GENERATED_HTML" "$ABS_PATH" "$TITLE" "$GENERATED_AT" <<'PY'
+import html
+import json
+import pathlib
+import sys
+from textwrap import dedent
+
+out_path = pathlib.Path(sys.argv[1])
+markdown_path = pathlib.Path(sys.argv[2])
+title = sys.argv[3]
+generated_at = sys.argv[4]
+
+markdown_text = markdown_path.read_text(encoding="utf-8", errors="replace")
+
+def safe_json(value):
+    return json.dumps(value).replace('</', '<\\/')
+
+data = {
+    "title_html": html.escape(title),
+    "title_json": safe_json(title),
+    "markdown_json": safe_json(markdown_text),
+    "header_basename": html.escape(markdown_path.name),
+    "header_abspath": html.escape(str(markdown_path)),
+    "file_json": safe_json(str(markdown_path)),
+    "basename_json": safe_json(markdown_path.name),
+    "generated_json": safe_json(generated_at),
+    "generated_at": generated_at,
+}
+
+template = dedent("""\
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>__TITLE_HTML__</title>
+      <meta name="generator" content="openmd script">
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.2.0/github-markdown.min.css">
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+      <style>
+        :root {
+          color-scheme: light dark;
+          --bg-light: #f6f8fa;
+          --bg-dark: #0d1117;
+          --text-light: #24292f;
+          --text-dark: #c9d1d9;
+          --accent: #2f81f7;
+          --border-light: #d0d7de;
+          --border-dark: #30363d;
+          --surface-light: #ffffff;
+          --surface-dark: #161b22;
+        }
+
+        * {
+          box-sizing: border-box;
+        }
+
+        body {
+          margin: 0;
+          font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          background-color: var(--surface-light);
+          color: var(--text-light);
+          transition: background-color 0.3s ease, color 0.3s ease;
+        }
+
+        body[data-theme="dark"] {
+          background-color: var(--surface-dark);
+          color: var(--text-dark);
+        }
+
+        header {
+          position: sticky;
+          top: 0;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 1rem;
+          flex-wrap: wrap;
+          padding: 0.75rem 1.5rem;
+          backdrop-filter: blur(12px);
+          background-color: color-mix(in srgb, var(--surface-light) 82%, transparent);
+          border-bottom: 1px solid var(--border-light);
+          z-index: 10;
+        }
+
+        body[data-theme="dark"] header {
+          background-color: color-mix(in srgb, var(--surface-dark) 82%, transparent);
+          border-color: var(--border-dark);
+        }
+
+        .meta {
+          display: flex;
+          flex-direction: column;
+          font-size: 0.85rem;
+          line-height: 1.35;
+        }
+
+        .meta strong {
+          font-size: 1rem;
+        }
+
+        .meta code {
+          font-family: "SFMono-Regular", ui-monospace, "Roboto Mono", Menlo, monospace;
+          font-size: 0.85rem;
+        }
+
+        .controls {
+          display: flex;
+          gap: 0.5rem;
+          align-items: center;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .control-button {
+          border: 1px solid var(--border-light);
+          background: var(--surface-light);
+          color: var(--text-light);
+          border-radius: 999px;
+          padding: 0.35rem 0.9rem;
+          font-size: 0.85rem;
+          cursor: pointer;
+          transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+          white-space: nowrap;
+        }
+
+        body[data-theme="dark"] .control-button {
+          border-color: var(--border-dark);
+          background: var(--surface-dark);
+          color: var(--text-dark);
+        }
+
+        .control-button:hover {
+          border-color: var(--accent);
+          color: var(--accent);
+        }
+
+        .toast {
+          position: fixed;
+          right: 1.5rem;
+          bottom: 1.5rem;
+          padding: 0.45rem 0.85rem;
+          border-radius: 999px;
+          border: 1px solid var(--border-light);
+          background: var(--surface-light);
+          color: var(--text-light);
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+          opacity: 0;
+          transform: translateY(8px);
+          pointer-events: none;
+          transition: opacity 0.2s ease, transform 0.2s ease;
+          font-size: 0.85rem;
+        }
+
+        body[data-theme="dark"] .toast {
+          border-color: var(--border-dark);
+          background: var(--surface-dark);
+          color: var(--text-dark);
+        }
+
+        .toast.show {
+          opacity: 1;
+          transform: translateY(0);
+        }
+
+        main {
+          max-width: min(1100px, 92vw);
+          margin: 0 auto;
+          padding: 2.5rem 1.75rem 3.5rem;
+        }
+
+        main.markdown-body {
+          background: color-mix(in srgb, currentColor 3%, transparent);
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+          padding: min(6vw, 3.5rem);
+        }
+
+        main.markdown-body :is(h1, h2, h3, h4, h5, h6) {
+          scroll-margin-top: 5.5rem;
+        }
+
+        main.markdown-body pre {
+          font-size: 0.9rem;
+        }
+
+        main.markdown-body code:not(pre code) {
+          padding: 0.15em 0.35em;
+          border-radius: 4px;
+          background: color-mix(in srgb, currentColor 8%, transparent);
+        }
+
+        .footer-note {
+          margin-top: 3rem;
+          font-size: 0.8rem;
+          color: color-mix(in srgb, currentColor 60%, transparent);
+          border-top: 1px dashed color-mix(in srgb, currentColor 50%, transparent);
+          padding-top: 1rem;
+        }
+
+        .footer-note a {
+          color: inherit;
+          text-decoration: underline;
+        }
+
+        .fallback-markdown {
+          background: color-mix(in srgb, currentColor 4%, transparent);
+          border-radius: 8px;
+          padding: 1.5rem;
+          white-space: pre-wrap;
+          word-break: break-word;
+          line-height: 1.55;
+          font-size: 0.95rem;
+          border: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+        }
+
+        @media print {
+          body {
+            background: #ffffff;
+            color: #000000;
+          }
+
+          header,
+          .footer-note,
+          .toast {
+            display: none !important;
+          }
+
+          main {
+            max-width: none;
+            padding: 0;
+          }
+
+          main.markdown-body {
+            border: none;
+            background: transparent;
+            padding: 0;
+          }
+        }
+      </style>
+    </head>
+    <body data-theme="system">
+      <header>
+        <div class="meta">
+          <strong>__HEADER_BASENAME__</strong>
+          <span>Source: <code>__HEADER_ABSPATH__</code></span>
+          <span>Generated: <time datetime="__GENERATED_AT__">__GENERATED_AT__</time></span>
+        </div>
+        <div class="controls">
+          <button type="button" class="control-button" data-action="print">Save PDF</button>
+          <button type="button" class="control-button" data-action="copy-markdown">Copy Markdown</button>
+          <button type="button" class="control-button" data-action="copy-path">Copy Path</button>
+          <button type="button" class="control-button theme-toggle" data-mode="light">Light</button>
+          <button type="button" class="control-button theme-toggle" data-mode="system">System</button>
+          <button type="button" class="control-button theme-toggle" data-mode="dark">Dark</button>
+        </div>
+      </header>
+      <main id="content" class="markdown-body"></main>
+      <div class="toast" role="status" aria-live="polite"></div>
+      <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
+      <script>
+        const SOURCE = {
+          markdown: __MARKDOWN_JSON__,
+          title: __TITLE_JSON__,
+          file: __FILE_JSON__,
+          basename: __BASENAME_JSON__,
+          generated: __GENERATED_JSON__
+        };
+      </script>
+      <script>
+        (() => {
+          const SOURCE_MARKDOWN = SOURCE.markdown;
+          const contentEl = document.getElementById('content');
+          const toastEl = document.querySelector('.toast');
+          let toastTimer = null;
+
+          const THEME_STORAGE_KEY = 'openmd-theme';
+          const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+          const createSlugger = () => {
+            const seen = new Map();
+            return {
+              slug(value) {
+                const base = String(value)
+                  .trim()
+                  .toLowerCase()
+                  .replace(/<[^>]+>/g, '')
+                  .replace(/[^a-z0-9\\s-]/g, '')
+                  .replace(/\\s+/g, '-')
+                  .replace(/-+/g, '-')
+                  .replace(/^-|-$/g, '');
+                const count = seen.get(base) || 0;
+                seen.set(base, count + 1);
+                return count ? `${base}-${count}` : base;
+              },
+              reset() {
+                seen.clear();
+              }
+            };
+          };
+
+          const ensureMarked = () => {
+            if (window.marked && typeof window.marked.parse === 'function') {
+              return window.marked;
+            }
+            console.warn('openmd: marked CDN unavailable, using fallback renderer');
+            return null;
+          };
+
+          const markedRef = ensureMarked();
+          const slugger = markedRef && typeof markedRef.Slugger === 'function'
+            ? new markedRef.Slugger()
+            : createSlugger();
+
+          if (markedRef) {
+            const renderer = new markedRef.Renderer();
+            renderer.heading = (text, level, raw) => {
+              const slug = slugger.slug(raw);
+              return `<h${level} id="${slug}">${text}</h${level}>`;
+            };
+
+            markedRef.use({ renderer });
+            markedRef.setOptions({
+              gfm: true,
+              breaks: false,
+              mangle: false,
+              headerIds: true
+            });
+          }
+
+          const escapeHtml = (value) => value
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+
+          const fallbackRender = (markdown) => `<pre class="fallback-markdown">${escapeHtml(markdown)}</pre>`;
+
+          const locateHeading = (rawId) => {
+            if (!rawId) return null;
+            const candidates = new Set([rawId]);
+            const collapsedHyphen = rawId.replace(/-+/g, '-');
+            candidates.add(collapsedHyphen);
+            const lower = rawId.toLowerCase();
+            candidates.add(lower);
+            candidates.add(lower.replace(/-+/g, '-'));
+            for (const candidate of candidates) {
+              if (!candidate) continue;
+              const el = document.getElementById(candidate);
+              if (el) {
+                return el;
+              }
+            }
+            return null;
+          };
+
+          const scrollToHash = (hash, behavior = 'smooth') => {
+            if (!hash || hash === '#') return false;
+            const id = decodeURIComponent(hash.replace(/^#/, ''));
+            if (!id) return false;
+            const target = locateHeading(id);
+            if (!target) return false;
+            target.scrollIntoView({ behavior, block: 'start' });
+            return true;
+          };
+
+          const renderMarkdown = () => {
+            slugger.reset();
+            if (markedRef) {
+              contentEl.innerHTML = markedRef.parse(SOURCE_MARKDOWN);
+              if (window.hljs && typeof window.hljs.highlightAll === 'function') {
+                window.hljs.highlightAll();
+              }
+            } else {
+              contentEl.innerHTML = fallbackRender(SOURCE_MARKDOWN);
+            }
+          };
+
+          const applyTheme = (mode) => {
+            const resolved = mode === 'system' ? (mediaQuery.matches ? 'dark' : 'light') : mode;
+            document.body.setAttribute('data-theme', resolved);
+            document.body.setAttribute('data-theme-mode', mode);
+          };
+
+          const initTheme = () => {
+            let initialTheme = 'system';
+            try {
+              const stored = localStorage.getItem(THEME_STORAGE_KEY);
+              if (stored) {
+                initialTheme = stored;
+              }
+            } catch (err) {
+              console.warn('openmd: unable to access localStorage', err);
+            }
+            applyTheme(initialTheme);
+            mediaQuery.addEventListener('change', () => {
+              let mode = 'system';
+              try {
+                mode = localStorage.getItem(THEME_STORAGE_KEY) || 'system';
+              } catch (err) {
+                mode = 'system';
+              }
+              if (mode === 'system') {
+                applyTheme('system');
+              }
+            });
+            const themeButtons = document.querySelectorAll('button.theme-toggle');
+            themeButtons.forEach((btn) => {
+              btn.addEventListener('click', () => {
+                const mode = btn.dataset.mode || 'system';
+                applyTheme(mode);
+                try {
+                  localStorage.setItem(THEME_STORAGE_KEY, mode);
+                } catch (err) {
+                  console.warn('openmd: failed to persist theme preference', err);
+                }
+              });
+            });
+          };
+
+          const showToast = (message) => {
+            if (!toastEl) {
+              return;
+            }
+            toastEl.textContent = message;
+            toastEl.classList.add('show');
+            if (toastTimer) {
+              clearTimeout(toastTimer);
+            }
+            toastTimer = setTimeout(() => {
+              toastEl.classList.remove('show');
+              toastTimer = null;
+            }, 2200);
+          };
+
+          const copyText = async (value, label) => {
+            if (!value) {
+              showToast('Nothing to copy');
+              return;
+            }
+            if (navigator.clipboard && window.isSecureContext) {
+              try {
+                await navigator.clipboard.writeText(value);
+                showToast(label);
+                return;
+              } catch (err) {
+                console.warn('openmd: clipboard write failed', err);
+              }
+            }
+            const textarea = document.createElement('textarea');
+            textarea.value = value;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.top = '-9999px';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            let copied = false;
+            try {
+              copied = document.execCommand('copy');
+            } catch (err) {
+              console.warn('openmd: fallback clipboard copy failed', err);
+            }
+            document.body.removeChild(textarea);
+            showToast(copied ? label : 'Copy failed');
+          };
+
+          const initActions = () => {
+            const actionButtons = document.querySelectorAll('[data-action]');
+            actionButtons.forEach((btn) => {
+              btn.addEventListener('click', () => {
+                const action = btn.dataset.action;
+                switch (action) {
+                  case 'print':
+                    window.print();
+                    break;
+                  case 'copy-markdown':
+                    copyText(SOURCE.markdown, 'Markdown copied');
+                    break;
+                  case 'copy-path':
+                    copyText(SOURCE.file, 'Path copied');
+                    break;
+                  default:
+                    break;
+                }
+              });
+            });
+          };
+
+          const initAnchors = () => {
+            if (window.location.hash) {
+              requestAnimationFrame(() => {
+                scrollToHash(window.location.hash, 'auto');
+              });
+            }
+            window.addEventListener('hashchange', () => {
+              scrollToHash(window.location.hash);
+            });
+            document.addEventListener('click', (event) => {
+              const anchor = event.target.closest && event.target.closest('a[href^="#"]');
+              if (!anchor) {
+                return;
+              }
+              const href = anchor.getAttribute('href');
+              if (!href) {
+                return;
+              }
+              event.preventDefault();
+              const success = scrollToHash(href, 'smooth');
+              if (success && window.location.hash !== href) {
+                history.pushState(null, '', href);
+              }
+            });
+          };
+
+          const init = () => {
+            renderMarkdown();
+            initTheme();
+            initAnchors();
+            initActions();
+          };
+
+          init();
+        })();
+      </script>
+      <div class="footer-note markdown-body">
+        <p>Preview generated by <code>openmd</code> at __GENERATED_AT__. Reload the page to reflect file changes.</p>
+      </div>
+    </body>
+    </html>
+    """)
+
+replacements = {
+    "__TITLE_HTML__": data["title_html"],
+    "__TITLE_JSON__": data["title_json"],
+    "__MARKDOWN_JSON__": data["markdown_json"],
+    "__FILE_JSON__": data["file_json"],
+    "__BASENAME_JSON__": data["basename_json"],
+    "__GENERATED_JSON__": data["generated_json"],
+    "__HEADER_BASENAME__": data["header_basename"],
+    "__HEADER_ABSPATH__": data["header_abspath"],
+    "__GENERATED_AT__": data["generated_at"],
+}
+
+for placeholder, value in replacements.items():
+    template = template.replace(placeholder, value)
+
+out_path.write_text(template, encoding="utf-8")
+PY
+
+printf 'openmd: wrote %s\n' "$GENERATED_HTML"
+
+if [[ "${NO_OPEN:-0}" -eq 0 && -z "${OPENMD_NO_OPEN:-}" ]]; then
+  if ! launch_browser "$GENERATED_HTML"; then
+    error "preview generated at: $GENERATED_HTML"
+    exit 1
+  fi
+fi
