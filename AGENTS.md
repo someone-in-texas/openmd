@@ -9,7 +9,7 @@ This repository is intentionally small. Treat it like a single-script utility, n
 - `README.md`: human-facing usage documentation
 - `AGENTS.md`: agent-facing workflow notes
 
-There is no build system, package manager, test runner, or release pipeline in this repo.
+The runtime has no build system or package manager. `tests/` contains standalone Python and Chromium checks. `scripts/package.py` creates release downloads, and `.github/workflows/release.yml` tests changes and publishes tagged releases. See `RELEASE.md` for the release procedure.
 
 ## What `openmd` Does
 
@@ -38,7 +38,7 @@ Implementation details:
 
 ## Validation
 
-There is no formal automated test suite today. Use lightweight validation:
+Run `python3 tests/smoke.py` for CLI and Git regressions; run `tests/browser.cjs` as documented in `RELEASE.md` for preview changes. Also use these lightweight checks:
 
 ```bash
 ./openmd --help

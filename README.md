@@ -33,6 +33,7 @@ It keeps the input file untouched, writes a temporary `.html` file, and opens it
 ### Options
 
 - `--title TEXT`: set a custom HTML `<title>`
+- `--version`: print the installed version
 - `--no-open`: generate the preview without launching a browser
 - `-h`, `--help`: print usage information
 
@@ -117,3 +118,9 @@ All versions and status indicators are captured when you run `openmd`. Run it ag
 - The generated preview reflects the file contents at generation time. Reloading the page does not re-read the source file.
 - The preview uses CDN assets for Marked, highlight.js, and GitHub Markdown CSS. If those are unavailable, Markdown rendering falls back to a plain escaped `<pre>` block.
 - `.html` files are ignored by this repository's `.gitignore`.
+
+## Downloads and releases
+
+Download the executable or archive from [GitHub Releases](https://github.com/someone-in-texas/openmd/releases). The executable works on macOS and Linux with the requirements above; after downloading, run `chmod +x openmd` and `./openmd --version`. Each release includes `SHA256SUMS` for verifying downloads (`shasum -a 256 -c SHA256SUMS` on macOS, or `sha256sum -c SHA256SUMS` on Linux, with all assets downloaded).
+
+See [RELEASE.md](RELEASE.md) for the tested release process and [CHANGELOG.md](CHANGELOG.md) for changes.
