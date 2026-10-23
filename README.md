@@ -4,6 +4,30 @@
 
 It keeps the input file untouched, writes a temporary `.html` file, and opens it in your browser unless you tell it not to.
 
+## Install
+
+On macOS or Linux with Bash, Python 3, and curl:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/someone-in-texas/openmd/releases/latest/download/install.sh | bash
+```
+
+Installs the release to `~/.local/bin` without sudo and verifies the executable’s SHA-256 checksum before replacing an existing installation. Add the directory to your shell’s PATH if needed:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+openmd --version
+openmd notes.md
+```
+
+To choose a directory or pin a version, pass environment variables to **bash**:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/someone-in-texas/openmd/releases/download/v0.5.1/install.sh | OPENMD_INSTALL_DIR="$HOME/bin" OPENMD_VERSION=0.5.1 bash
+```
+
+You can also download `install.sh` from [GitHub Releases](https://github.com/someone-in-texas/openmd/releases), inspect it, and run `bash install.sh`. Rerun the installer to upgrade; remove the installed `openmd` file to uninstall. The installer does not modify your shell configuration. Manual executable and archive downloads are available below.
+
 ## Features
 
 - GitHub-flavored Markdown rendering

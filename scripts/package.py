@@ -20,6 +20,9 @@ if out.exists():
 out.mkdir()
 files = ['openmd', 'README.md', 'CHANGELOG.md']
 shutil.copy2(root / 'openmd', out / 'openmd')
+if (root / 'install.sh').exists():
+    files.append('install.sh')
+    shutil.copy2(root / 'install.sh', out / 'install.sh')
 archive = out / ('openmd-' + version + '.tar.gz')
 with tarfile.open(archive, 'w:gz') as tar:
     for name in files:
@@ -33,4 +36,6 @@ with tempfile.TemporaryDirectory(prefix='openmd-package-') as temp:
     hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\n'
     for path in sorted(out.iterdir())
 ))
+if (out / 'install.sh').exists():
+    subprocess.run(['python3', str(root / 'tests/install.py')], check=True)
 print('Release downloads:', out)

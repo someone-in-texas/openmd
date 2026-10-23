@@ -2,16 +2,16 @@
 
 The runtime stays a single Bash/Python script. The release workflow tests Linux and macOS, runs Chromium regressions, and publishes only when a `v*` tag passes all checks.
 
-1. Update `VERSION` in `openmd`, add the version's `## <version>` entry to `CHANGELOG.md`, and update user-facing documentation.
+1. Update `VERSION` in `openmd` and the default version in `install.sh`, add the version's `## <version>` entry to `CHANGELOG.md`, and update user-facing documentation.
 2. Run local checks:
 
    ```bash
-   bash -n openmd
+   bash -n openmd install.sh
    python3 tests/smoke.py
-   python3 scripts/package.py v0.5
+   python3 scripts/package.py v0.5.1
    ```
 
-   Replace `v0.5` with the version being released. Packaging checks that the tag matches `openmd --version` and runs smoke tests against the executable extracted from the archive.
+   Replace `v0.5.1` with the version being released. Packaging checks that the tag matches `openmd --version` and runs smoke tests against the executable extracted from the archive, and tests the packaged installer with successful installs, upgrades, invalid versions, corrupt downloads, and missing dependencies. Installer tests feed the script to Bash on stdin and stub the release downloads; the workflow additionally tests actual public HTTPS downloads after publication.
 
 3. Run the browser checks (Node.js is needed only for tests):
 
@@ -27,12 +27,12 @@ The runtime stays a single Bash/Python script. The release workflow tests Linux 
 
    ```bash
    git push origin main
-   git tag -a v0.5 -m "openmd 0.5"
-   git push origin v0.5
+   git tag -a v0.5.1 -m "openmd 0.5.1"
+   git push origin v0.5.1
    ```
 
-5. Watch **Test and release** in GitHub Actions. The tag run creates a draft release, uploads `openmd`, `openmd-<version>.tar.gz`, and `SHA256SUMS`, downloads and verifies those assets, then publishes the release and verifies the public executable download. Inspect the completed run and the release assets before announcing success.
+5. Watch **Test and release** in GitHub Actions. The tag run creates a draft release, uploads `openmd`, `openmd-<version>.tar.gz`, `install.sh`, and `SHA256SUMS`, downloads and verifies those assets, then publishes the release and verifies the public executable download and a real curl install, including generating a preview with the installed executable. Inspect the completed run and the release assets before announcing success.
 
-The raw executable works on macOS and Linux with Bash and Python 3; it is not architecture-specific. The archive includes the README and changelog. Users downloading the raw executable need `chmod +x openmd`.
+The raw executable works on macOS and Linux with Bash and Python 3; it is not architecture-specific. The archive includes the README, changelog, and installer. Users downloading the raw executable need `chmod +x openmd`.
 
 Published tags/releases must not be moved or overwritten. If a run fails before publication, inspect the error and remove only its incomplete draft release before rerunning the failed jobs. If it fails after publication, inspect and retry verification; use a new version for code fixes.

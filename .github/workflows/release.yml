@@ -12,19 +12,24 @@ permissions:
 
 jobs:
   smoke:
+    timeout-minutes: 10
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: bash -n openmd && python3 tests/smoke.py
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Test executable, package, and installer
+        run: |
+          bash -n openmd install.sh
+          python3 scripts/package.py "v$(./openmd --version | cut -d ' ' -f 2)"
 
   browser:
-    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
       - name: Install browser test tools outside the project
@@ -35,16 +40,17 @@ jobs:
         run: PLAYWRIGHT_MODULE="$RUNNER_TEMP/browser-tools/node_modules/playwright" node tests/browser.cjs
 
   release:
+    timeout-minutes: 10
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [smoke, browser]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Package and test downloads
         run: python3 scripts/package.py "$TAG"
       - name: Publish release downloads
@@ -61,3 +67,8 @@ jobs:
         run: |
           curl --fail --silent --show-error --location "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/openmd" -o "$RUNNER_TEMP/public-openmd"
           cmp dist/openmd "$RUNNER_TEMP/public-openmd"
+      - name: Verify public curl install
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/install.sh" | OPENMD_INSTALL_DIR="$RUNNER_TEMP/installed" bash
+          test "$("$RUNNER_TEMP/installed/openmd" --version)" = "openmd ${TAG#v}"
+          OPENMD_NO_OPEN=1 "$RUNNER_TEMP/installed/openmd" README.md

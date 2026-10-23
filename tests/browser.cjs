@@ -69,6 +69,7 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
         });
       });
       await currentPage.locator('#git-version').selectOption('0');
+      await currentPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       for (const hash of ['', '#bottom']) {
         await currentPage.evaluate(hash => {
           history.replaceState(null, '', location.pathname + hash);
@@ -76,10 +77,12 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
         }, hash);
         assert(await currentPage.evaluate(() => scrollY > 500));
         await currentPage.locator('#git-version').selectOption('1');
+        await currentPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         await currentPage.waitForFunction(() => scrollY === 0);
         assert.equal(await currentPage.evaluate(() => location.hash), '');
         await currentPage.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
         await currentPage.locator('#git-version').selectOption('0');
+        await currentPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         await currentPage.waitForFunction(() => scrollY === 0);
       }
     }
