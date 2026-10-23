@@ -21,6 +21,8 @@ Preview features:
   • Dark/light themes with system sync and manual toggles
   • Quick actions for saving PDFs and copying Markdown or paths
   • Sticky metadata header and safe anchor navigation
+  • Local links and images resolved relative to the Markdown file
+  • Git working-copy status, HEAD, and local-branch version selection
 EOF
 }
 
@@ -143,7 +145,10 @@ create_temp_html
 python3 - "$GENERATED_HTML" "$ABS_PATH" "$TITLE" "$GENERATED_AT" <<'PY'
 import html
 import json
+import os
 import pathlib
+import re
+import subprocess
 import sys
 from textwrap import dedent
 
@@ -154,10 +159,96 @@ generated_at = sys.argv[4]
 
 markdown_text = markdown_path.read_text(encoding="utf-8", errors="replace")
 
+
+def git_preview():
+    # Git is optional. All commands are read-only, including in linked worktrees.
+    git_dir = markdown_path.parent
+
+    def git(*args):
+        try:
+            return subprocess.run(
+                ["git", "-C", str(git_dir), *args],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1"},
+                check=False,
+            )
+        except FileNotFoundError:
+            return None
+
+    root = git("rev-parse", "--show-toplevel")
+    if root is None or root.returncode:
+        return None
+    git_dir = pathlib.Path(os.fsdecode(root.stdout).rstrip("\n"))
+    try:
+        relative = (markdown_path.parent.resolve() / markdown_path.name).relative_to(git_dir.resolve()).as_posix()
+    except ValueError:
+        return None
+    tracked = git("ls-files", "--error-unmatch", "--", relative)
+    head_file = git("cat-file", "-t", "HEAD:" + relative)
+    if tracked.returncode and (head_file.returncode or head_file.stdout.strip() != b"blob"):
+        return None
+
+    def status(*paths):
+        result = git("status", "--porcelain=v1", "-z", "--untracked-files=normal", "--no-renames", *paths)
+        if result.returncode:
+            return "Status unavailable"
+        codes = [entry[:2] for entry in result.stdout.split(b"\0") if entry]
+        labels = []
+        if any(code[:1] not in (b" ", b"?") for code in codes):
+            labels.append("staged changes")
+        if any(code[1:2] not in (b" ", b"?") for code in codes):
+            labels.append("unstaged changes")
+        if b"??" in codes:
+            labels.append("untracked files")
+        return ", ".join(labels) if labels else "clean"
+
+    head = git("rev-parse", "--verify", "HEAD")
+    commit = head.stdout.decode().strip() if not head.returncode else None
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    branch_name = os.fsdecode(branch.stdout).strip() if not branch.returncode else "Detached HEAD"
+    if not commit:
+        branch_name += " (no commits yet)"
+    elif branch.returncode:
+        branch_name += " at " + commit[:12]
+
+    versions = [{"label": "Working copy", "markdown": markdown_text, "detail": "Current file at generation time"}]
+    cache = {}
+
+    def add_version(label, oid):
+        if oid not in cache:
+            kind = git("cat-file", "-t", oid + ":" + relative)
+            blob = git("show", oid + ":" + relative) if kind.stdout.strip() == b"blob" else None
+            cache[oid] = blob.stdout.decode("utf-8", errors="replace") if blob and not blob.returncode else None
+        text = cache[oid]
+        versions.append({
+            "label": label,
+            "markdown": text,
+            "detail": "Commit " + oid[:12] if text is not None else "File absent or unreadable at this revision",
+        })
+
+    if commit:
+        add_version("Last committed version (HEAD)", commit)
+    branches = git("for-each-ref", "--format=%(refname)\t%(objectname)", "refs/heads/")
+    for line in os.fsdecode(branches.stdout).splitlines():
+        ref, oid = line.split("\t", 1)
+        add_version("Branch: " + ref[len("refs/heads/"):], oid)
+    return {
+        "branch": branch_name,
+        "repositoryStatus": status(),
+        "fileStatus": status("--", relative),
+        "versions": versions,
+    }
+
+
+git_data = git_preview()
+
+
 def safe_json(value):
     return json.dumps(value).replace('</', '<\\/')
 
 data = {
+    "base_html": html.escape(markdown_path.parent.as_uri() + "/", quote=True),
+    "git_json": safe_json(git_data),
     "title_html": html.escape(title),
     "title_json": safe_json(title),
     "markdown_json": safe_json(markdown_text),
@@ -177,6 +268,7 @@ template = dedent("""\
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <title>__TITLE_HTML__</title>
       <meta name="generator" content="openmd script">
+      <base href="__BASE_HTML__">
       <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.2.0/github-markdown.min.css">
       <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
       <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
@@ -245,6 +337,24 @@ template = dedent("""\
         .meta code {
           font-family: "SFMono-Regular", ui-monospace, "Roboto Mono", Menlo, monospace;
           font-size: 0.85rem;
+        }
+
+        #git-panel {
+          flex-basis: 100%;
+          font-size: 0.85rem;
+        }
+
+        #git-panel label {
+          margin-right: 0.5rem;
+        }
+
+        #git-status, #git-detail {
+          display: block;
+          margin: 0.35rem 0;
+        }
+
+        #git-version {
+          max-width: 100%;
         }
 
         .controls {
@@ -397,6 +507,12 @@ template = dedent("""\
           <button type="button" class="control-button theme-toggle" data-mode="system">System</button>
           <button type="button" class="control-button theme-toggle" data-mode="dark">Dark</button>
         </div>
+        <div id="git-panel" hidden>
+          <span id="git-status"></span>
+          <label for="git-version">View</label>
+          <select id="git-version" class="control-button"></select>
+          <span id="git-detail" role="status"></span>
+        </div>
       </header>
       <main id="content" class="markdown-body"></main>
       <div class="toast" role="status" aria-live="polite"></div>
@@ -405,6 +521,7 @@ template = dedent("""\
       <script>
         const SOURCE = {
           markdown: __MARKDOWN_JSON__,
+          git: __GIT_JSON__,
           title: __TITLE_JSON__,
           file: __FILE_JSON__,
           basename: __BASENAME_JSON__,
@@ -413,7 +530,7 @@ template = dedent("""\
       </script>
       <script>
         (() => {
-          const SOURCE_MARKDOWN = SOURCE.markdown;
+          let sourceMarkdown = SOURCE.markdown;
           const contentEl = document.getElementById('content');
           const toastEl = document.querySelector('.toast');
           let toastTimer = null;
@@ -501,10 +618,16 @@ template = dedent("""\
 
           const scrollToHash = (hash, behavior = 'smooth') => {
             if (!hash || hash === '#') return false;
-            const id = decodeURIComponent(hash.replace(/^#/, ''));
+            let id;
+            try {
+              id = decodeURIComponent(hash.replace(/^#/, ''));
+            } catch (err) {
+              return false;
+            }
             if (!id) return false;
             const target = locateHeading(id);
             if (!target) return false;
+            target.style.scrollMarginTop = `${document.querySelector('header').getBoundingClientRect().height + 16}px`;
             target.scrollIntoView({ behavior, block: 'start' });
             return true;
           };
@@ -512,13 +635,52 @@ template = dedent("""\
           const renderMarkdown = () => {
             slugger.reset();
             if (markedRef) {
-              contentEl.innerHTML = markedRef.parse(SOURCE_MARKDOWN);
+              contentEl.innerHTML = markedRef.parse(sourceMarkdown);
               if (window.hljs && typeof window.hljs.highlightAll === 'function') {
                 window.hljs.highlightAll();
               }
             } else {
-              contentEl.innerHTML = fallbackRender(SOURCE_MARKDOWN);
+              contentEl.innerHTML = fallbackRender(sourceMarkdown);
             }
+            // The source-directory base also affects fragments. Keep their actual
+            // URLs in this preview, including when opened in another tab.
+            contentEl.querySelectorAll('a[href^="#"]').forEach((anchor) => {
+              const hash = anchor.getAttribute('href');
+              anchor.dataset.openmdHash = hash;
+              anchor.href = new URL(hash, window.location.href).href;
+            });
+          };
+
+          const initGit = () => {
+            if (!SOURCE.git) return;
+            const panel = document.getElementById('git-panel');
+            const select = document.getElementById('git-version');
+            const detail = document.getElementById('git-detail');
+            document.getElementById('git-status').textContent =
+              `Branch: ${SOURCE.git.branch} · Repository: ${SOURCE.git.repositoryStatus} · File: ${SOURCE.git.fileStatus}`;
+            SOURCE.git.versions.forEach((version, index) => {
+              const option = document.createElement('option');
+              option.value = String(index);
+              option.textContent = version.label + (version.markdown === null ? ' (file unavailable)' : '');
+              option.disabled = version.markdown === null;
+              select.appendChild(option);
+            });
+            const update = () => {
+              const version = SOURCE.git.versions[Number(select.value)];
+              sourceMarkdown = version.markdown;
+              detail.textContent = `${version.label} · ${version.detail}`;
+              renderMarkdown();
+              // A hash or the browser's scroll anchoring can otherwise jump to
+              // an unrelated position in the newly rendered version.
+              const previewURL = new URL(window.location.href);
+              previewURL.hash = '';
+              history.replaceState(null, '', previewURL.href);
+              requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: 'instant' }));
+            };
+            select.value = '0';
+            select.addEventListener('change', update);
+            detail.textContent = `${SOURCE.git.versions[0].label} · ${SOURCE.git.versions[0].detail}`;
+            panel.hidden = false;
           };
 
           const applyTheme = (mode) => {
@@ -621,7 +783,7 @@ template = dedent("""\
                     window.print();
                     break;
                   case 'copy-markdown':
-                    copyText(SOURCE.markdown, 'Markdown copied');
+                    copyText(sourceMarkdown, 'Markdown copied');
                     break;
                   case 'copy-path':
                     copyText(SOURCE.file, 'Path copied');
@@ -643,24 +805,28 @@ template = dedent("""\
               scrollToHash(window.location.hash);
             });
             document.addEventListener('click', (event) => {
-              const anchor = event.target.closest && event.target.closest('a[href^="#"]');
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              const anchor = event.target.closest && event.target.closest('a[data-openmd-hash]');
               if (!anchor) {
                 return;
               }
-              const href = anchor.getAttribute('href');
+              const href = anchor.dataset.openmdHash;
               if (!href) {
                 return;
               }
               event.preventDefault();
               const success = scrollToHash(href, 'smooth');
               if (success && window.location.hash !== href) {
-                history.pushState(null, '', href);
+                const previewURL = new URL(window.location.href);
+                previewURL.hash = href;
+                history.pushState(null, '', previewURL.href);
               }
             });
           };
 
           const init = () => {
             renderMarkdown();
+            initGit();
             initTheme();
             initAnchors();
             initActions();
@@ -670,13 +836,15 @@ template = dedent("""\
         })();
       </script>
       <div class="footer-note markdown-body">
-        <p>Preview generated by <code>openmd</code> at __GENERATED_AT__. Reload the page to reflect file changes.</p>
+        <p>Preview generated by <code>openmd</code> at __GENERATED_AT__. Run openmd again to refresh file contents and Git status.</p>
       </div>
     </body>
     </html>
     """)
 
 replacements = {
+    "__BASE_HTML__": data["base_html"],
+    "__GIT_JSON__": data["git_json"],
     "__TITLE_HTML__": data["title_html"],
     "__TITLE_JSON__": data["title_json"],
     "__MARKDOWN_JSON__": data["markdown_json"],
@@ -688,8 +856,8 @@ replacements = {
     "__GENERATED_AT__": data["generated_at"],
 }
 
-for placeholder, value in replacements.items():
-    template = template.replace(placeholder, value)
+# Substitute once so source text containing placeholder names stays unchanged.
+template = re.sub(r"__[A-Z_]+__", lambda match: replacements.get(match[0], match[0]), template)
 
 out_path.write_text(template, encoding="utf-8")
 PY
